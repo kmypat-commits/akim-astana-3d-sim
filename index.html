@@ -1382,7 +1382,11 @@
       <button class="map-free-btn" id="btn-free-map" onclick="toggleFreeMapMode()" title="Скрыть/показать панели проектов для обзора всей карты (клавиша H)">
         <span>👁 Свободный обзор (H)</span>
       </button>
-      <div class="map-hint-line">ЛКМ: двигать • ПКМ: 3D-вращение • Колесо: зум</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
+        <button class="map-cam-btn" onclick="flyToLrtCorridor()" title="Навести камеру на эстакаду и поезда Astana LRT" style="font-size:9px;color:#38bdf8;">🚄 Линия ЛРТ</button>
+        <button class="map-cam-btn" id="btn-green-wave" onclick="toggleGreenWaveMode()" title="Включить/выключить синхронную Зеленую волну светофоров ИТС" style="font-size:9px;color:var(--mint);">🚦 ИТС Волна</button>
+      </div>
+      <div class="map-hint-line">Клик по светофору: смена фазы • ЛКМ: двигать</div>
     </aside>
 
     <!-- 4. Навигатор 6 районов Астаны слева внизу (.city-navigator) -->
@@ -1412,7 +1416,9 @@
 
       <div class="city-actions">
         <button id="chip-buildings3d" class="layer-chip active" onclick="toggleLayerVisibility('buildings3d')">3D Здания</button>
-        <button id="chip-trips" class="layer-chip active" onclick="toggleLayerVisibility('trips')">Потоки</button>
+        <button id="chip-lrt" class="layer-chip active" onclick="toggleLayerVisibility('lrt')">🚄 Astana ЛРТ</button>
+        <button id="chip-trafficLights" class="layer-chip active" onclick="toggleLayerVisibility('trafficLights')">🚦 Светофоры</button>
+        <button id="chip-trips" class="layer-chip active" onclick="toggleLayerVisibility('trips')">🚗 Трафик и BRT</button>
         <button id="chip-arcs" class="layer-chip active" onclick="toggleLayerVisibility('arcs')">3D Дуги</button>
         <button id="chip-hexagons" class="layer-chip" onclick="toggleLayerVisibility('hexagons')">Hexbin</button>
       </div>
