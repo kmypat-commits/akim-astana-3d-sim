@@ -4,6 +4,12 @@
 
 (function () {
   const DATA = window.QAZGOV_DATA;
+  // Подключаем 100% реальную геометрию улиц, перекрестков и трассы ЛРТ г. Астана из OpenStreetMap / OSRM (5500+ вершин)
+  if (window.ASTANA_REAL_ROADS && DATA) {
+    DATA.lrtLine = window.ASTANA_REAL_ROADS.lrtLine;
+    DATA.trafficLights = window.ASTANA_REAL_ROADS.trafficLights;
+    DATA.tripsRoutes = window.ASTANA_REAL_ROADS.tripsRoutes;
+  }
 
   const GROUPS = [
     { id: "all", label: "Все проекты (11)" },
@@ -28,7 +34,7 @@
       lrt: true,
       trafficLights: true,
       trips: true,
-      arcs: true,
+      arcs: false,
       hexagons: false,
       polygons: true
     },
@@ -253,17 +259,29 @@
 
   function loadSavedState() {
     try {
-      const raw = localStorage.getItem("QAZGOV_ASTANA_NATIVE_V5");
+      const raw = localStorage.getItem("QAZGOV_ASTANA_NATIVE_V6");
       if (raw) {
         const parsed = JSON.parse(raw);
         Object.assign(state, parsed);
+        state.layersVisible = Object.assign(
+          {
+            buildings3d: true,
+            lrt: true,
+            trafficLights: true,
+            trips: true,
+            arcs: false,
+            hexagons: false,
+            polygons: true
+          },
+          parsed.layersVisible || {}
+        );
       }
     } catch (e) {}
   }
 
   function saveState() {
     try {
-      localStorage.setItem("QAZGOV_ASTANA_NATIVE_V5", JSON.stringify(state));
+      localStorage.setItem("QAZGOV_ASTANA_NATIVE_V6", JSON.stringify(state));
     } catch (e) {}
   }
 
@@ -721,12 +739,13 @@
   };
 
   window.resetSimulationAll = function () {
+    localStorage.removeItem("QAZGOV_ASTANA_NATIVE_V6");
     localStorage.removeItem("QAZGOV_ASTANA_NATIVE_V5");
     window.location.reload();
   };
 
   // ============================================================================
-  // СИМУЛЯТОР ДОРОЖНОГО ДВИЖЕНИЯ, РЕАЛЬНЫХ СВЕТОФОРОВ ИТС И ЛИНИИ ASTANA LRT
+  // СИМУЛЯТОР ДОРОЖНОГО ДВИЖЕНИЯ ПО РЕАЛЬНОМУ ГРАФУ УЛИЦ OSRM, СВЕТОФОРОВ И ASTANA LRT
   // ============================================================================
   let simClockSec = 0;
   let greenWaveManual = false;
@@ -748,57 +767,100 @@
     updateDeckLayers();
     showToast(
       isGreenWaveEnabled()
-        ? "🚦 ЦОУ ДП ИТС: Включена адаптивная «Зеленая волна» на 14 главных перекрестках Астаны!"
+        ? "🚦 ЦОУ ДП ИТС: Включена адаптивная «Зеленая волна» на 16 перекрестках Астаны!"
         : "🚦 Светофоры переведены в стандартный пофазный режим регулирования."
     );
   };
 
-  // Интерполяция точки и угла курса вдоль ломаной линии маршрута (t в диапазоне 0..1)
-  function samplePointAlongPolyline(path, tNorm, laneOffsetDeg = 0) {
-    if (!path || path.length === 0) return { position: [71.4305, 51.1283], angleDeg: 0 };
-    if (path.length === 1) return { position: path[0], angleDeg: 0 };
+  // Построение ориентированного 3D-корпуса автомобиля / автобуса CTS / вагона ЛРТ вдоль вектора реальной улицы
+  function buildOrientedVehicleBox(centerLngLat, angleRad, halfLenMeters, halfWidMeters) {
+    const lng = centerLngLat[0];
+    const lat = centerLngLat[1];
+    // Перевод метров в градусы на широте Астаны (51.13° N: cos(51.13°) ≈ 0.6275)
+    const metersPerDegLat = 111132;
+    const metersPerDegLng = 111320 * 0.6275;
 
-    const t = Math.max(0, Math.min(0.99999, tNorm));
-    let totalLen = 0;
-    const segLens = [];
-    for (let i = 0; i < path.length - 1; i++) {
-      const dx = path[i + 1][0] - path[i][0];
-      const dy = path[i + 1][1] - path[i][1];
-      const l = Math.hypot(dx, dy);
-      segLens.push(l);
-      totalLen += l;
-    }
-    if (totalLen <= 1e-9) return { position: path[0], angleDeg: 0 };
+    const cosA = Math.cos(angleRad);
+    const sinA = Math.sin(angleRad);
 
-    let targetDist = t * totalLen;
-    for (let i = 0; i < segLens.length; i++) {
-      const segL = segLens[i];
-      if (targetDist <= segL || i === segLens.length - 1) {
-        const localT = segL > 1e-9 ? targetDist / segL : 0;
-        const p0 = path[i];
-        const p1 = path[i + 1];
-        const dx = p1[0] - p0[0];
-        const dy = p1[1] - p0[1];
-        const len = Math.hypot(dx, dy) || 1;
-        // Перпендикулярный сдвиг полосы движения
-        const nx = (-dy / len) * laneOffsetDeg;
-        const ny = (dx / len) * laneOffsetDeg;
-        const lng = p0[0] + dx * localT + nx;
-        const lat = p0[1] + dy * localT + ny;
-        const angleDeg = (Math.atan2(dy, dx) * 180) / Math.PI;
-        return { position: [lng, lat], angleDeg };
-      }
-      targetDist -= segL;
-    }
-    return { position: path[path.length - 1], angleDeg: 0 };
+    // Четыре угла прямоугольного корпуса в локальных метрах (продольная ось X, поперечная Y)
+    const cornersLocal = [
+      [halfLenMeters, halfWidMeters],
+      [halfLenMeters, -halfWidMeters],
+      [-halfLenMeters, -halfWidMeters],
+      [-halfLenMeters, halfWidMeters]
+    ];
+
+    return cornersLocal.map(([lx, ly]) => {
+      const rx = lx * cosA - ly * sinA;
+      const ry = lx * sinA + ly * cosA;
+      return [lng + rx / metersPerDegLng, lat + ry / metersPerDegLat];
+    });
   }
 
-  // Генерация 3D-опор эстакады Astana LRT, парка из 95 автомобилей/автобусов CTS и 3-вагонных составов ЛРТ
+  // Быстрая интерполяция точки и точного путевого угла вдоль 500-точечной реальной полилинии OSRM
+  function samplePointAlongPolyline(path, tNorm, laneOffsetDeg = 0) {
+    if (!path || path.length === 0) return { position: [71.4305, 51.1283], angleRad: 0 };
+    if (path.length === 1) return { position: path[0], angleRad: 0 };
+
+    if (!path._cumDists) {
+      let total = 0;
+      const cum = [0];
+      for (let i = 1; i < path.length; i++) {
+        // Приводим dLng к масштабу широты Астаны для равномерной метрической скорости
+        const dx = (path[i][0] - path[i - 1][0]) * 0.6275;
+        const dy = path[i][1] - path[i - 1][1];
+        total += Math.hypot(dx, dy);
+        cum.push(total);
+      }
+      path._cumDists = cum;
+      path._totalLen = total;
+    }
+
+    const totalLen = path._totalLen;
+    if (totalLen <= 1e-9) return { position: path[0], angleRad: 0 };
+
+    const t = Math.max(0, Math.min(0.99999, tNorm));
+    const targetDist = t * totalLen;
+    const cum = path._cumDists;
+
+    // Бинарный поиск нужного сегмента реальной улицы
+    let lo = 0;
+    let hi = cum.length - 2;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (cum[mid + 1] < targetDist) lo = mid + 1;
+      else hi = mid;
+    }
+
+    const segStartDist = cum[lo];
+    const segLen = cum[lo + 1] - segStartDist;
+    const localT = segLen > 1e-9 ? (targetDist - segStartDist) / segLen : 0;
+
+    const p0 = path[lo];
+    const p1 = path[lo + 1];
+    const dx = p1[0] - p0[0];
+    const dy = p1[1] - p0[1];
+    const metricDx = dx * 0.6275;
+    const metricDy = dy;
+    const angleRad = Math.atan2(metricDy, metricDx);
+
+    const len = Math.hypot(dx, dy) || 1;
+    const nx = (-dy / len) * laneOffsetDeg;
+    const ny = (dx / len) * laneOffsetDeg;
+
+    return {
+      position: [p0[0] + dx * localT + nx, p0[1] + dy * localT + ny],
+      angleRad
+    };
+  }
+
+  // Генерация 3D-опор эстакады Astana LRT, парка из 130 автомобилей/автобусов CTS и 3-вагонных составов ЛРТ
   function initTrafficAndLrtFleet() {
-    // 1. 3D-опоры эстакады ЛРТ (76 железобетонных колонн вдоль 22.4 км линии)
+    // 1. 3D-опоры эстакады ЛРТ (90 железобетонных колонн строго по трассе OSRM)
     lrtPillarsCache = [];
     if (DATA.lrtLine && DATA.lrtLine.path) {
-      const count = 76;
+      const count = 90;
       for (let i = 0; i <= count; i++) {
         const sample = samplePointAlongPolyline(DATA.lrtLine.path, i / count, 0);
         lrtPillarsCache.push({
@@ -809,51 +871,56 @@
       }
     }
 
-    // 2. Парк дорожных машин (car) и экспресс-автобусов CTS (bus) по всем коридорам города
+    // 2. Парк дорожных машин (car) и сочлененных 18м автобусов CTS (bus) строго по реальным полосам улиц OSRM
     roadVehiclesFleet = [];
     const roadRoutes = (DATA.tripsRoutes || []).filter((r) => r.type !== "lrt");
     roadRoutes.forEach((route, rIdx) => {
       const isBusRoute = route.type === "bus" || route.vehicleClass === "bus";
-      const countOnRoute = isBusRoute ? 8 : 12;
+      const countOnRoute = isBusRoute ? 9 : 12;
       for (let k = 0; k < countOnRoute; k++) {
         const isBus = isBusRoute ? k % 2 === 0 : k % 5 === 0;
+        // Малый сдвиг внутри проезжей части (±1.8 м), чтобы машины шли ровно по полосам реального асфальта
         const laneSign = k % 2 === 0 ? 1 : -1;
-        const laneOffset = laneSign * (isBus ? 0.00018 : 0.00009);
-        const initT = (k / countOnRoute + rIdx * 0.07) % 1;
-        const pt = samplePointAlongPolyline(route.path, initT, laneOffset);
+        const laneOffset = laneSign * 0.000018;
+        const initT = (k / countOnRoute + rIdx * 0.063) % 1;
+        const sample = samplePointAlongPolyline(route.path, initT, laneOffset);
+        const halfLen = isBus ? 13.5 : 7.2;
+        const halfWid = isBus ? 3.4 : 2.6;
+
         roadVehiclesFleet.push({
           id: `veh_${route.id}_${k}`,
           routeId: route.id,
           path: route.path,
           vehicleType: isBus ? "bus" : "car",
           t: initT,
-          direction: isBusRoute ? 1 : laneSign,
           laneOffset,
-          baseSpeed: isBus ? 0.036 : 0.044 + (k % 3) * 0.006,
-          position: pt.position,
-          isStoppedAtRed: false,
-          label: isBus ? `CTS Bus #${10 + (rIdx * 7 + k) % 60}` : ""
+          baseSpeed: isBus ? 0.024 : 0.030 + (k % 3) * 0.004,
+          position: sample.position,
+          angleRad: sample.angleRad,
+          polygon: buildOrientedVehicleBox(sample.position, sample.angleRad, halfLen, halfWid),
+          isStoppedAtRed: false
         });
       }
     });
 
-    // 3. Составы легкорельсового транспорта Astana LRT (по 3 сочлененных вагона в каждом составе)
+    // 3. Составы легкорельсового транспорта Astana LRT (по 3 сочлененных 3D-вагона в каждом составе)
     lrtTrainsFleet = [];
     if (DATA.lrtLine && DATA.lrtLine.path) {
       const trainConfigs = [
-        { id: "LRT-01", name: "LRT-01 • Экспресс Аэропорт", t: 0.14, dir: 1, speed: 0.042 },
-        { id: "LRT-02", name: "LRT-02 • Нурлы Жол", t: 0.42, dir: -1, speed: 0.041 },
-        { id: "LRT-03", name: "LRT-03 • Дом Министерств", t: 0.64, dir: 1, speed: 0.043 },
-        { id: "LRT-04", name: "LRT-04 • ЭКСПО / Сыганак", t: 0.82, dir: -1, speed: 0.040 },
-        { id: "LRT-05", name: "LRT-05 • Абу-Даби Плаза", t: 0.29, dir: 1, speed: 0.044 },
-        { id: "LRT-06", name: "LRT-06 • Ботанический сад", t: 0.53, dir: -1, speed: 0.042 }
+        { id: "LRT-01", name: "LRT-01 • Аэропорт → Нурлы Жол", t: 0.12, dir: 1, speed: 0.025 },
+        { id: "LRT-02", name: "LRT-02 • Нурлы Жол → ЭКСПО", t: 0.36, dir: -1, speed: 0.024 },
+        { id: "LRT-03", name: "LRT-03 • Дом Министерств", t: 0.54, dir: 1, speed: 0.026 },
+        { id: "LRT-04", name: "LRT-04 • Абу-Даби Плаза", t: 0.72, dir: -1, speed: 0.025 },
+        { id: "LRT-05", name: "LRT-05 • Ботанический сад", t: 0.24, dir: 1, speed: 0.025 },
+        { id: "LRT-06", name: "LRT-06 • Нацмузей / Калдаякова", t: 0.86, dir: -1, speed: 0.024 }
       ];
       trainConfigs.forEach((cfg) => {
-        const pt = samplePointAlongPolyline(DATA.lrtLine.path, cfg.t, cfg.dir * 0.00011);
+        const sample = samplePointAlongPolyline(DATA.lrtLine.path, cfg.t, cfg.dir * 0.00003);
         lrtTrainsFleet.push({
           ...cfg,
-          position: pt.position,
-          carriages: [pt.position, pt.position, pt.position],
+          position: sample.position,
+          angleRad: sample.angleRad,
+          carriages: [],
           dwellingSec: 0,
           speedKmh: 72
         });
@@ -861,7 +928,7 @@
     }
   }
 
-  // Расчет текущих фаз реальных светофоров Астаны (КРАСНЫЙ / ЖЕЛТЫЙ / ЗЕЛЕНЫЙ + обратный отсчет в секундах)
+  // Расчет текущих фаз 16 реальных светофоров Астаны (КРАСНЫЙ / ЖЕЛТЫЙ / ЗЕЛЕНЫЙ + обратный отсчет в секундах)
   function computeTrafficLightsLiveState() {
     const list = DATA.trafficLights || [];
     const gw = isGreenWaveEnabled();
@@ -927,16 +994,16 @@
     });
   }
 
-  // Шаг физической симуляции машин, автобусов CTS (с остановкой на красный сигнал светофора) и поездов Astana LRT
+  // Шаг физической симуляции 3D-машин, автобусов CTS (с остановкой на красный светофор) и 3-вагонных поездов Astana LRT
   function stepTrafficAndLrtSimulation(dtSec, liveTrafficLights) {
     if (!roadVehiclesFleet.length) initTrafficAndLrtFleet();
 
     const effCong = getEffectiveCongestion();
-    const congestionSlowdown = effCong <= 35 ? 1.35 : effCong <= 55 ? 1.0 : 0.65;
+    const congestionSlowdown = effCong <= 35 ? 1.35 : effCong <= 55 ? 1.0 : 0.68;
     const hasBrtPriority = !!state.completedProjects.prj_bus_brt;
     const hasLrtProject = !!state.completedProjects.prj_lrt_launch;
 
-    // 1. Обновление позиций автомобилей и экспресс-автобусов CTS с реакцией на светофоры
+    // 1. Движение 3D-автомобилей и экспресс-автобусов CTS строго по графу реальных улиц OSRM
     roadVehiclesFleet.forEach((v) => {
       let mustStopForRed = false;
       if (state.layersVisible.trafficLights && liveTrafficLights && liveTrafficLights.length) {
@@ -946,8 +1013,8 @@
             const dx = v.position[0] - tl.position[0];
             const dy = v.position[1] - tl.position[1];
             const dist = Math.hypot(dx, dy);
-            // Если машина подъехала к перекрестку ближе чем на ~190 метров, она тормозит перед стоп-линией
-            if (dist < 0.0021 && !(v.vehicleType === "bus" && hasBrtPriority)) {
+            // Торможение перед стоп-линией реального перекрестка (~130 м)
+            if (dist < 0.00145 && !(v.vehicleType === "bus" && hasBrtPriority)) {
               mustStopForRed = true;
               break;
             }
@@ -956,16 +1023,21 @@
       }
 
       v.isStoppedAtRed = mustStopForRed;
+      const halfLen = v.vehicleType === "bus" ? 13.5 : 7.2;
+      const halfWid = v.vehicleType === "bus" ? 3.4 : 2.6;
+
       if (!mustStopForRed) {
-        const mult = v.vehicleType === "bus" && hasBrtPriority ? 1.45 : congestionSlowdown;
-        const deltaT = v.baseSpeed * mult * dtSec * (v.direction >= 0 ? 1 : -1);
-        v.t = (v.t + deltaT + 1) % 1;
+        const mult = v.vehicleType === "bus" && hasBrtPriority ? 1.4 : congestionSlowdown;
+        // Всегда двигаемся вперед (t растет) по односторонней проезжей части OSRM-маршрута
+        v.t = (v.t + v.baseSpeed * mult * dtSec) % 1;
         const sample = samplePointAlongPolyline(v.path, v.t, v.laneOffset);
         v.position = sample.position;
+        v.angleRad = sample.angleRad;
+        v.polygon = buildOrientedVehicleBox(sample.position, sample.angleRad, halfLen, halfWid);
       }
     });
 
-    // 2. Обновление 3-вагонных экспресс-поездов Astana LRT на эстакаде
+    // 2. Движение 3-вагонных экспресс-поездов Astana LRT строго по 843 вершинам эстакады
     if (DATA.lrtLine && DATA.lrtLine.path) {
       const lrtSpeedBoost = hasLrtProject ? 1.45 : 1.0;
       lrtTrainsFleet.forEach((tr) => {
@@ -974,39 +1046,40 @@
           tr.speedKmh = 0;
         } else {
           tr.t += tr.dir * tr.speed * lrtSpeedBoost * dtSec;
-          if (tr.t >= 0.98) {
-            tr.t = 0.98;
+          if (tr.t >= 0.985) {
+            tr.t = 0.985;
             tr.dir = -1;
             tr.dwellingSec = 1.2;
-          } else if (tr.t <= 0.02) {
-            tr.t = 0.02;
+          } else if (tr.t <= 0.015) {
+            tr.t = 0.015;
             tr.dir = 1;
             tr.dwellingSec = 1.2;
           }
           tr.speedKmh = hasLrtProject ? 80 : 68;
         }
 
-        const latOff = tr.dir * 0.00012;
-        const headPt = samplePointAlongPolyline(DATA.lrtLine.path, tr.t, latOff).position;
-        const midPt = samplePointAlongPolyline(
-          DATA.lrtLine.path,
-          Math.max(0, Math.min(1, tr.t - tr.dir * 0.0085)),
-          latOff
-        ).position;
-        const tailPt = samplePointAlongPolyline(
-          DATA.lrtLine.path,
-          Math.max(0, Math.min(1, tr.t - tr.dir * 0.017)),
-          latOff
-        ).position;
+        const latOff = tr.dir * 0.000032;
+        const carSpacingT = 0.0042;
+        const cars = [0, 1, 2].map((cIdx) => {
+          const ct = Math.max(0.001, Math.min(0.999, tr.t - tr.dir * cIdx * carSpacingT));
+          const s = samplePointAlongPolyline(DATA.lrtLine.path, ct, latOff);
+          return {
+            position: s.position,
+            angleRad: s.angleRad,
+            isHead: cIdx === 0,
+            polygon: buildOrientedVehicleBox(s.position, s.angleRad, 16.5, 4.2)
+          };
+        });
 
-        tr.position = headPt;
-        tr.carriages = [headPt, midPt, tailPt];
+        tr.position = cars[0].position;
+        tr.angleRad = cars[0].angleRad;
+        tr.carriages = cars;
 
-        // Проверка кратковременной остановки на станциях ЛРТ
+        // Кратковременная остановка на реальных станциях ЛРТ
         if (tr.dwellingSec <= 0 && DATA.lrtLine.stations) {
           for (let s = 0; s < DATA.lrtLine.stations.length; s++) {
             const st = DATA.lrtLine.stations[s].position;
-            if (Math.hypot(headPt[0] - st[0], headPt[1] - st[1]) < 0.00075 && Math.random() < 0.08) {
+            if (Math.hypot(tr.position[0] - st[0], tr.position[1] - st[1]) < 0.00065 && Math.random() < 0.07) {
               tr.dwellingSec = 1.1;
               tr.speedKmh = 0;
               break;
@@ -1371,13 +1444,14 @@
         );
       }
 
-      // 4D. Движущиеся 3-вагонные составы Astana LRT (3D вагоны + световой ореол + телеметрия скорости)
+      // 4D. Движущиеся 3-вагонные составы Astana LRT (ориентированные 3D-вагоны по курсу рельсов + телеметрия скорости)
       const allCarriages = [];
       lrtTrainsFleet.forEach((tr) => {
-        (tr.carriages || [tr.position]).forEach((pos, idx) => {
+        (tr.carriages || []).forEach((carObj, idx) => {
           allCarriages.push({
             id: `${tr.id}_car_${idx}`,
-            position: pos,
+            position: carObj.position,
+            polygon: carObj.polygon,
             isHead: idx === 0,
             trainName: tr.name,
             speedKmh: tr.speedKmh
@@ -1385,32 +1459,18 @@
         });
       });
 
-      if (deck.ScatterplotLayer && allCarriages.length) {
+      if (deck.PolygonLayer && allCarriages.length) {
         layers.push(
-          new deck.ScatterplotLayer({
-            id: "astana-lrt-headlight-glow",
-            data: lrtTrainsFleet.map((t) => ({ position: t.position })),
-            pickable: false,
-            getPosition: (d) => [...d.position, 26],
-            getRadius: 58,
-            radiusMinPixels: 9,
-            getFillColor: [56, 189, 248, 95]
-          })
-        );
-      }
-
-      if (deck.ColumnLayer && allCarriages.length) {
-        layers.push(
-          new deck.ColumnLayer({
-            id: "astana-lrt-train-cars-3d",
+          new deck.PolygonLayer({
+            id: "astana-lrt-train-cars-3d-boxes",
             data: allCarriages,
             pickable: false,
-            diskResolution: 12,
-            radius: 21,
             extruded: true,
-            getPosition: (d) => d.position,
-            getElevation: (d) => (d.isHead ? 38 : 34),
-            getFillColor: (d) => (d.isHead ? [255, 189, 105, 255] : [56, 189, 248, 250])
+            wireframe: true,
+            getPolygon: (d) => d.polygon,
+            getElevation: (d) => (d.isHead ? 34 : 31),
+            getFillColor: (d) => (d.isHead ? [255, 189, 105, 255] : [56, 189, 248, 245]),
+            getLineColor: [255, 255, 255, 220]
           })
         );
       }
@@ -1421,10 +1481,10 @@
             id: "astana-lrt-train-badges",
             data: lrtTrainsFleet.map((t) => ({
               position: t.position,
-              label: `${t.id} (${t.speedKmh > 0 ? t.speedKmh + " км/ч" : "ПОСАДКА"})`
+              label: `🚄 ${t.id} • ${t.speedKmh > 0 ? t.speedKmh + " км/ч" : "ПОСАДКА"}`
             })),
             pickable: false,
-            getPosition: (d) => [d.position[0], d.position[1], 56],
+            getPosition: (d) => [d.position[0], d.position[1], 48],
             getText: (d) => d.label,
             getSize: 11,
             getColor: [12, 23, 35, 255],
@@ -1439,26 +1499,8 @@
       }
     }
 
-    // 5. Многополосный дорожный трафик: магистрали, реактивные автомобили и автобусы Bus Lane (BRT)
+    // 5. Дорожный трафик строго по реальному графу улиц OSRM (3D-корпуса автомобилей и 18м автобусов CTS + световые следы фар)
     if (state.layersVisible.trips) {
-      const roadRoutesOnly = (DATA.tripsRoutes || []).filter((r) => r.type !== "lrt");
-      layers.push(
-        new deck.PathLayer({
-          id: "astana-corridors-base",
-          data: roadRoutesOnly,
-          pickable: false,
-          getPath: (d) => d.path,
-          getColor: (d) =>
-            d.type === "bus"
-              ? [142, 220, 190, 195]
-              : isGreen
-              ? [142, 220, 190, 165]
-              : [255, 159, 139, 175],
-          widthMinPixels: 5,
-          rounded: true
-        })
-      );
-
       if (deck.TripsLayer) {
         layers.push(
           new deck.TripsLayer({
@@ -1473,37 +1515,36 @@
                 : d.type === "bus"
                 ? [142, 220, 190]
                 : [255, 189, 105],
-            opacity: 0.96,
-            widthMinPixels: 4.5,
+            opacity: 0.78,
+            widthMinPixels: 2.5,
             rounded: true,
-            trailLength: 18,
+            trailLength: 6,
             currentTime: tripsTime
           })
         );
       }
 
-      // 5B. Живой поток из 95 автомобилей и экспресс-автобусов CTS (тормозящих перед красным сигналом светофоров!)
-      if (deck.ScatterplotLayer && roadVehiclesFleet.length) {
+      // 5B. 3D-корпуса автомобилей и сочлененных автобусов CTS, поворачивающие строго по изгибам реальных улиц Астаны
+      if (deck.PolygonLayer && roadVehiclesFleet.length) {
         layers.push(
-          new deck.ScatterplotLayer({
-            id: "astana-live-vehicles-dots",
+          new deck.PolygonLayer({
+            id: "astana-live-vehicles-3d-boxes",
             data: roadVehiclesFleet.map((v) => ({
-              position: v.position,
+              polygon: v.polygon,
               vehicleType: v.vehicleType,
               isStoppedAtRed: v.isStoppedAtRed
             })),
             pickable: false,
-            getPosition: (d) => [...d.position, 6],
-            getRadius: (d) => (d.vehicleType === "bus" ? 26 : 16),
-            radiusMinPixels: 4,
-            radiusMaxPixels: 11,
+            extruded: true,
             stroked: true,
-            lineWidthMinPixels: 1.5,
-            getLineColor: [12, 23, 35, 230],
+            lineWidthMinPixels: 1,
+            getPolygon: (d) => d.polygon,
+            getElevation: (d) => (d.vehicleType === "bus" ? 8.5 : 4.2),
+            getLineColor: [12, 23, 35, 220],
             getFillColor: (d) => {
-              if (d.isStoppedAtRed) return [255, 71, 87, 255]; // Стоп-сигналы при остановке на красный светофор
-              if (d.vehicleType === "bus") return [142, 220, 190, 255]; // Автобусы CTS (Bus Lane)
-              return [255, 214, 130, 245]; // Поток автомобилей
+              if (d.isStoppedAtRed) return [255, 71, 87, 255]; // Красные стоп-сигналы при остановке перед светофором
+              if (d.vehicleType === "bus") return [142, 220, 190, 255]; // Автобусы CTS (Bus Lane BRT)
+              return [255, 206, 115, 250]; // Легковые автомобили на проспектах
             }
           })
         );
