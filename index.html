@@ -1,0 +1,1436 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover" />
+  <title>Аким Астаны: разрули! • Настольная 3D-стратегия и тренажер компетенций РК</title>
+  <!-- Шрифты оригинала: Oswald (600, 700) + Manrope (400, 600, 700, 800) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&family=Oswald:wght@600;700&display=swap" rel="stylesheet">
+  <!-- MapLibre GL CSS & JS (3D-здания Астаны) -->
+  <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+  <!-- deck.gl WebGL Engine (Потоки, 3D дуги, 3D гексагоны Kepler) -->
+  <script src="https://unpkg.com/deck.gl@8.9.33/dist.min.js"></script>
+  <!-- GSAP 3.12 для кинематографичной физики и плавной интерполяции -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+
+  <style>
+    @property --scan-angle {
+      syntax: '<angle>';
+      initial-value: 0deg;
+      inherits: false;
+    }
+
+    :root {
+      color: #eef3f5;
+      font-synthesis: none;
+      --panel: #142330;
+      --deep: #0c1723;
+      --muted: #aec0cf;
+      --line: #a6c8de26;
+      --gold: #ffbd69;
+      --mint: #8edcbe;
+      --coral: #ff9f8b;
+      --cyan: #38bdf8;
+      --display: 'Oswald', sans-serif;
+      --shadow: 0 16px 44px #02081280;
+      --radius: 12px;
+      --side: 364px;
+      background: #0b1521;
+      font-family: 'Manrope', sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #0b1521;
+      color: #eef3f5;
+      -webkit-font-smoothing: antialiased;
+    }
+    button, input, select { font: inherit; }
+    button {
+      color: inherit;
+      cursor: pointer;
+      background: transparent;
+      border: 0;
+      font-variant-numeric: tabular-nums;
+    }
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.48;
+    }
+    button:active:not(:disabled) {
+      transform: translateY(1px) scale(0.985);
+    }
+    button:focus-visible, select:focus-visible, input:focus-visible {
+      outline: 2px solid var(--gold);
+      outline-offset: 2px;
+    }
+    ::selection {
+      color: #0c1723;
+      background: var(--gold);
+    }
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-thumb { background: #577085; border-radius: 9px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    h1, h2, h3, h4, p, dl, dt, dd { margin: 0; }
+    h1, h2 { text-wrap: balance; }
+    svg { flex-shrink: 0; }
+    strong, b, dd { font-variant-numeric: tabular-nums; }
+
+    /* Игровая оболочка 100vw x 100dvh с перспективой для 3D-HUD */
+    .game-shell {
+      isolation: isolate;
+      width: 100vw;
+      height: 100dvh;
+      position: relative;
+      overflow: hidden;
+      perspective: 1400px;
+    }
+    .city-canvas {
+      background: #152d43;
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+    }
+    /* Футуристическая голографическая виньетка и тонкая телеметрическая сетка поверх 3D-карты */
+    .city-canvas::after {
+      content: "";
+      pointer-events: none;
+      z-index: 1;
+      background:
+        radial-gradient(circle at 50% 50%, transparent 52%, #050d17b8 100%),
+        linear-gradient(#07132085, transparent 20% 74%, #071320c5),
+        repeating-linear-gradient(0deg, rgba(142, 220, 190, 0.018) 0px, rgba(142, 220, 190, 0.018) 1px, transparent 1px, transparent 4px);
+      position: absolute;
+      inset: 0;
+    }
+    #kepler-map-container {
+      width: 100%;
+      height: 100%;
+      cursor: grab;
+      pointer-events: auto !important;
+      touch-action: none;
+    }
+    #kepler-map-container:active {
+      cursor: grabbing;
+    }
+    #kepler-map-container .maplibregl-canvas {
+      cursor: grab;
+      pointer-events: auto !important;
+    }
+    #kepler-map-container .maplibregl-canvas:active {
+      cursor: grabbing;
+    }
+    /* Гарантируем, что наложенный холст deck.gl никогда не перехватывает перетаскивание и зум мыши */
+    #kepler-map-container canvas:not(.maplibregl-canvas) {
+      pointer-events: none !important;
+    }
+
+    /* Эффект импульсной лазерной волны по карте при запуске реформы или смене месяца */
+    .telemetry-pulse-wave {
+      pointer-events: none;
+      z-index: 2;
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 40px;
+      height: 40px;
+      margin-left: -20px;
+      margin-top: -20px;
+      border-radius: 50%;
+      border: 2px solid var(--mint);
+      box-shadow: 0 0 35px var(--mint), inset 0 0 20px var(--mint);
+      opacity: 0;
+    }
+
+    /* Верхняя полоса ресурсов (.topbar & .resource-strip) с живым световым сканером */
+    .topbar {
+      z-index: 4;
+      height: 74px;
+      gap: 10px;
+      display: flex;
+      align-items: stretch;
+      position: absolute;
+      inset: 16px 24px auto;
+      pointer-events: none;
+    }
+    .topbar > * { pointer-events: auto; }
+    .brand-box {
+      background: rgba(12, 23, 35, 0.92);
+      backdrop-filter: blur(14px);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 0 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      border: 1px solid var(--line);
+      position: relative;
+      overflow: hidden;
+    }
+    .brand-symbol {
+      width: 42px;
+      height: 42px;
+      color: var(--gold);
+      border: 1px solid #ffbd6955;
+      border-radius: 10px;
+      display: grid;
+      place-items: center;
+      position: relative;
+      box-shadow: 0 0 18px rgba(255, 189, 105, 0.16);
+    }
+    .brand-symbol svg {
+      animation: holo-float 4s ease-in-out infinite;
+    }
+    .brand-title strong {
+      font-family: var(--display);
+      font-size: 19px;
+      letter-spacing: 0.03em;
+      display: block;
+      line-height: 1.1;
+    }
+    .brand-title small {
+      color: var(--gold);
+      letter-spacing: 0.14em;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      display: block;
+      margin-top: 3px;
+    }
+
+    .resource-strip {
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      background: rgba(12, 23, 35, 0.92);
+      backdrop-filter: blur(14px);
+      border: 1px solid var(--line);
+      flex: 1;
+      max-width: 920px;
+      display: flex;
+      overflow: hidden;
+      position: relative;
+    }
+    /* Тонкий футуристический луч телеметрии вдоль верхней грани панели ресурсов */
+    .resource-strip::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: -35%;
+      width: 35%;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, var(--mint), var(--gold), transparent);
+      animation: telemetry-sweep 6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+      pointer-events: none;
+    }
+    .stat {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 8px 18px;
+      min-width: 0;
+      border-right: 1px solid var(--line);
+      transition: background 0.25s ease;
+    }
+    .stat:last-child { border-right: 0; }
+    .stat:hover { background: rgba(255, 255, 255, 0.03); }
+    .stat > svg { color: var(--muted); width: 20px; height: 20px; }
+    .stat > div { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+    .stat-label { color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .stat strong {
+      font-family: var(--display);
+      letter-spacing: 0.01em;
+      font-size: 27px;
+      line-height: 1.1;
+      white-space: nowrap;
+    }
+    .stat strong small {
+      color: #c4d2dd;
+      margin-left: 4px;
+      font: 400 12px 'Manrope', sans-serif;
+    }
+    .stat em {
+      color: var(--muted);
+      font-size: 10px;
+      font-style: normal;
+      white-space: nowrap;
+    }
+    .stat.money strong { color: var(--gold); }
+    .stat.congestion {
+      background: #18232df5;
+      cursor: pointer;
+    }
+    .stat.congestion strong { color: var(--coral); }
+    .stat.congestion.green strong { color: var(--mint); }
+    .meter {
+      background: #334452;
+      border-radius: 4px;
+      width: 88px;
+      height: 3px;
+      margin-top: 5px;
+      display: block;
+      overflow: hidden;
+    }
+    .meter i {
+      background: linear-gradient(90deg, var(--mint), #38bdf8);
+      transform-origin: 0;
+      width: 100%;
+      height: 100%;
+      transition: transform 0.55s cubic-bezier(0.16, 1, 0.3, 1);
+      display: block;
+    }
+
+    /* Кнопки модулей справа вверху */
+    .top-actions {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .hud-btn {
+      height: 52px;
+      padding: 0 15px;
+      border-radius: var(--radius);
+      background: rgba(12, 23, 35, 0.92);
+      backdrop-filter: blur(14px);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      color: #eef3f5;
+      font-size: 12px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      white-space: nowrap;
+      transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), background 0.2s, border-color 0.2s, color 0.2s, box-shadow 0.2s;
+    }
+    .hud-btn:hover {
+      background: #1a2d3f;
+      border-color: #ffbd6988;
+      color: var(--gold);
+      transform: translateY(-2px);
+      box-shadow: 0 14px 32px rgba(0, 0, 0, 0.45), 0 0 16px rgba(255, 189, 105, 0.14);
+    }
+    .hud-btn.gold {
+      background: var(--gold);
+      color: #142230;
+      border-color: transparent;
+      box-shadow: 0 10px 28px rgba(255, 189, 105, 0.25);
+    }
+    .hud-btn.gold:hover {
+      background: #ffce8b;
+      color: #0c1723;
+      box-shadow: 0 14px 36px rgba(255, 189, 105, 0.42);
+    }
+
+    /* Заголовок города слева и окно финального контроля 55-60 мес */
+    .city-heading {
+      z-index: 2;
+      text-shadow: 0 2px 12px #000a;
+      position: absolute;
+      top: 108px;
+      left: 24px;
+      pointer-events: none;
+    }
+    .city-heading h1 {
+      font-family: var(--display);
+      letter-spacing: 0.025em;
+      text-transform: uppercase;
+      align-items: center;
+      gap: 12px;
+      font-size: 28px;
+      display: flex;
+    }
+    .status-pill {
+      letter-spacing: 0;
+      text-transform: none;
+      color: var(--mint);
+      text-shadow: none;
+      background: rgba(12, 23, 35, 0.88);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(142, 220, 190, 0.35);
+      border-radius: 6px;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 10px;
+      font: 700 11px 'Manrope', sans-serif;
+      display: inline-flex;
+      box-shadow: 0 0 16px rgba(142, 220, 190, 0.12);
+    }
+    .status-pill::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 8px currentColor;
+      animation: pulse-dot 1.8s ease-in-out infinite;
+    }
+    .status-pill.paused {
+      color: var(--gold);
+      border-color: rgba(255, 189, 105, 0.35);
+    }
+    .city-heading p {
+      color: #d2dce3;
+      margin-top: 4px;
+      font-size: 12px;
+    }
+
+    .final-window {
+      z-index: 2;
+      width: 176px;
+      position: absolute;
+      top: 176px;
+      left: 24px;
+      pointer-events: none;
+    }
+    .final-window > span {
+      color: #c3d5e0;
+      letter-spacing: 0.04em;
+      text-shadow: 0 1px 5px #000;
+      justify-content: space-between;
+      margin-bottom: 6px;
+      font-size: 10px;
+      font-weight: 700;
+      display: flex;
+    }
+    .final-window b { color: var(--mint); }
+    .final-window > div { gap: 3px; display: flex; }
+    .final-window i {
+      font-style: normal;
+      color: #aac0d0;
+      background: rgba(13, 30, 45, 0.9);
+      backdrop-filter: blur(8px);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      flex: 1;
+      place-items: center;
+      height: 24px;
+      font-size: 10px;
+      font-weight: 700;
+      display: grid;
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .final-window i.pass {
+      color: #c7f5e0;
+      background: #285c4c;
+      box-shadow: 0 0 12px rgba(142, 220, 190, 0.3);
+    }
+    .final-window i.fail { color: #ffcfbc; background: #6a3631; }
+    .final-window i.current { outline: 1px solid var(--gold); color: var(--gold); }
+
+    /* Пульт 3D-камеры и свободного перемещения по карте (.map-nav-pad) */
+    .map-nav-pad {
+      z-index: 3;
+      width: 176px;
+      background: rgba(12, 23, 35, 0.92);
+      backdrop-filter: blur(14px);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      padding: 9px 10px;
+      position: absolute;
+      top: 234px;
+      left: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .map-nav-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 9px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--gold);
+    }
+    .map-dpad-row {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 4px;
+    }
+    .map-cam-btn {
+      height: 28px;
+      background: #142330;
+      border: 1px solid rgba(166, 200, 222, 0.14);
+      border-radius: 6px;
+      color: #eef3f5;
+      font-size: 11px;
+      font-weight: 800;
+      display: grid;
+      place-items: center;
+      transition: all 0.15s ease;
+    }
+    .map-cam-btn:hover {
+      background: #253949;
+      border-color: var(--gold);
+      color: var(--gold);
+      transform: translateY(-1px);
+    }
+    .map-cam-btn.active {
+      background: var(--gold);
+      color: #142230;
+      border-color: transparent;
+    }
+    .map-free-btn {
+      width: 100%;
+      height: 28px;
+      background: #142330;
+      border: 1px solid rgba(142, 220, 190, 0.3);
+      border-radius: 6px;
+      color: var(--mint);
+      font-size: 10px;
+      font-weight: 800;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      transition: all 0.18s ease;
+    }
+    .map-free-btn:hover, .map-free-btn.active {
+      background: var(--mint);
+      color: #0c1723;
+      border-color: transparent;
+    }
+    .map-hint-line {
+      font-size: 9px;
+      color: var(--muted);
+      line-height: 1.3;
+      text-align: center;
+    }
+
+    /* Режим «Свободный обзор карты» (скрывает нижнюю рельсу и правый инспектор для обзора всего 3D-города) */
+    .game-shell.map-free-mode .project-rail,
+    .game-shell.map-free-mode .inspector {
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(24px) scale(0.98);
+      transition: all 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .project-rail, .inspector {
+      transition: opacity 0.28s cubic-bezier(0.16, 1, 0.3, 1), transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    /* Навигатор 6 районов Астаны слева внизу (.city-navigator) */
+    .city-navigator {
+      z-index: 3;
+      width: 176px;
+      box-shadow: var(--shadow);
+      background: rgba(12, 23, 35, 0.92);
+      backdrop-filter: blur(14px);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px;
+      position: absolute;
+      bottom: 16px;
+      left: 24px;
+    }
+    .city-navigator-title {
+      letter-spacing: 0.1em;
+      color: var(--gold);
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+      margin-bottom: 7px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .district-nav-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px;
+    }
+    .district-nav-btn {
+      background: #142330;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      padding: 6px 7px;
+      text-align: left;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1), background 0.18s, border-color 0.18s;
+    }
+    .district-nav-btn:hover {
+      background: #253949;
+      transform: translateY(-1px);
+    }
+    .district-nav-btn.active {
+      background: #253949;
+      border-color: var(--gold);
+      box-shadow: 0 0 12px rgba(255, 189, 105, 0.18);
+    }
+    .district-nav-btn span {
+      font-size: 11px;
+      font-weight: 700;
+      color: #eef3f5;
+    }
+    .district-nav-btn small {
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    /* Нижняя рельса проектов (.project-rail) */
+    .project-rail {
+      z-index: 3;
+      background: rgba(12, 23, 35, 0.94);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      gap: 10px;
+      height: 116px;
+      padding: 8px 10px;
+      display: flex;
+      position: absolute;
+      bottom: 84px;
+      left: 212px;
+      right: calc(var(--side) + 40px);
+      overflow: hidden;
+    }
+    .project-groups {
+      border-right: 1px solid var(--line);
+      flex-direction: column;
+      flex: 0 0 148px;
+      justify-content: center;
+      gap: 2px;
+      padding-right: 8px;
+      display: flex;
+    }
+    .project-groups button {
+      color: var(--muted);
+      text-align: left;
+      border-radius: 7px;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 9px;
+      font-size: 11px;
+      font-weight: 700;
+      display: flex;
+      transition: background 0.15s, color 0.15s, transform 0.15s;
+    }
+    .project-groups button:hover {
+      color: #eef3f5;
+      background: #253949;
+    }
+    .project-groups button.active {
+      color: var(--gold);
+      background: #253949;
+    }
+    .project-options {
+      flex: 1;
+      gap: 7px;
+      min-width: 0;
+      display: flex;
+      overflow-x: auto;
+      padding: 2px;
+    }
+    .project-tool {
+      background: #142330;
+      border: 1px solid rgba(166, 200, 222, 0.1);
+      border-radius: 9px;
+      flex: 0 0 138px;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 6px;
+      display: flex;
+      position: relative;
+      text-align: center;
+      transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), background 0.18s, color 0.18s, border-color 0.18s, box-shadow 0.22s;
+    }
+    .project-tool:hover {
+      color: #fff;
+      background: #253949;
+      border-color: rgba(255, 189, 105, 0.45);
+      transform: translateY(-3px);
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+    }
+    .project-tool.active {
+      background: var(--gold);
+      color: #142230;
+      border-color: transparent;
+      box-shadow: 0 6px 22px rgba(255, 189, 105, 0.35);
+      transform: translateY(-2px);
+    }
+    .project-tool > svg {
+      width: 24px;
+      height: 24px;
+      transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .project-tool:hover > svg {
+      transform: scale(1.1);
+    }
+    .project-tool-title {
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.15;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .tool-price {
+      color: #9ab0c1;
+      font-size: 10px;
+      font-weight: 600;
+    }
+    .project-tool.active .tool-price { color: #3d3222; }
+    .tool-dot {
+      background: var(--mint);
+      border-radius: 50%;
+      width: 6px;
+      height: 6px;
+      position: absolute;
+      top: 7px;
+      right: 7px;
+      box-shadow: 0 0 8px var(--mint);
+    }
+
+    /* Правый инспектор проекта и бригад (.inspector) с 3D-микросценой */
+    .inspector {
+      width: var(--side);
+      background: rgba(20, 35, 48, 0.95);
+      backdrop-filter: blur(18px);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      z-index: 3;
+      flex-direction: column;
+      display: flex;
+      position: absolute;
+      top: 104px;
+      bottom: 16px;
+      right: 24px;
+      overflow: hidden;
+      transform-style: preserve-3d;
+    }
+    .inspector-top {
+      color: var(--gold);
+      flex-shrink: 0;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 20px 8px;
+      display: flex;
+      border-bottom: 1px solid var(--line);
+    }
+    .inspector-top > span {
+      letter-spacing: 0.1em;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .inspector-scroll {
+      flex: 1;
+      min-height: 0;
+      padding: 14px 20px 10px;
+      overflow-y: auto;
+    }
+    .inspector h2 {
+      font-family: var(--display);
+      letter-spacing: 0.015em;
+      font-size: 25px;
+      line-height: 1.15;
+    }
+    .project-description {
+      color: #bfced9;
+      margin-top: 8px;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    /* Футуристическая анимированная голограмма работы проекта внутри инспектора */
+    .project-explainer {
+      background: #09131c;
+      border: 1px solid rgba(142, 220, 190, 0.22);
+      border-radius: 10px;
+      margin: 12px 0 14px;
+      overflow: hidden;
+      position: relative;
+      box-shadow: inset 0 0 24px rgba(0, 175, 202, 0.08);
+    }
+    .holo-blueprint {
+      width: 100%;
+      height: 112px;
+      display: block;
+      background:
+        radial-gradient(circle at 50% 50%, rgba(14, 165, 233, 0.14), transparent 70%),
+        repeating-linear-gradient(90deg, rgba(166, 200, 222, 0.04) 0px, rgba(166, 200, 222, 0.04) 1px, transparent 1px, transparent 18px),
+        repeating-linear-gradient(0deg, rgba(166, 200, 222, 0.04) 0px, rgba(166, 200, 222, 0.04) 1px, transparent 1px, transparent 18px);
+    }
+    .project-explainer figcaption {
+      color: var(--muted);
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 10px;
+      font-size: 10px;
+      display: flex;
+      background: #0c1723;
+      border-top: 1px solid var(--line);
+    }
+
+    .effect {
+      border-top: 1px solid var(--line);
+      gap: 9px;
+      padding: 10px 0;
+      display: flex;
+      align-items: flex-start;
+    }
+    .effect > svg { color: var(--mint); margin-top: 2px; }
+    .effect.waste > svg { color: var(--coral); }
+    .effect strong { color: #b0e5cf; font-size: 12px; display: block; }
+    .effect.waste strong { color: var(--coral); }
+    .effect p { color: var(--muted); margin-top: 2px; font-size: 11px; line-height: 1.45; }
+
+    .project-cost {
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+      margin-top: 4px;
+      font-size: 12px;
+    }
+    .project-cost > div {
+      justify-content: space-between;
+      gap: 8px;
+      margin: 6px 0;
+      display: flex;
+    }
+    .project-cost dt { color: var(--muted); }
+    .project-cost dd { font-weight: 700; }
+    .project-cost .total {
+      border-top: 1px solid var(--line);
+      margin-top: 9px;
+      padding-top: 9px;
+      font-size: 13px;
+    }
+    .project-cost .total dd { color: var(--gold); font-size: 15px; }
+
+    .inspector-actions {
+      background: #10202d;
+      border-top: 1px solid var(--line);
+      flex-shrink: 0;
+      padding: 12px 20px 14px;
+    }
+    .primary {
+      background: var(--gold);
+      color: #142230;
+      border-radius: 7px;
+      justify-content: space-between;
+      align-items: center;
+      width: 100%;
+      min-height: 44px;
+      padding: 11px 16px;
+      font-size: 13px;
+      font-weight: 800;
+      display: flex;
+      position: relative;
+      overflow: hidden;
+      transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1), background 0.18s, box-shadow 0.18s;
+    }
+    .primary:hover:not(:disabled) {
+      background: #ffce8b;
+      box-shadow: 0 8px 25px rgba(255, 189, 105, 0.35);
+      transform: translateY(-1px);
+    }
+    .primary:disabled { color: #dce3e7; background: #45545e; }
+    .crews {
+      color: var(--muted);
+      border-top: 1px solid var(--line);
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 10px;
+      padding-top: 9px;
+      font-size: 10px;
+      display: flex;
+    }
+    .crews b { color: #ebf1f4; margin-left: 3px; }
+    .construction-list {
+      max-height: 64px;
+      margin-top: 6px;
+      overflow-y: auto;
+    }
+    .construction-list > div {
+      justify-content: space-between;
+      padding: 5px 0 7px;
+      font-size: 10px;
+      display: flex;
+      position: relative;
+    }
+    .construction-list strong { color: var(--gold); }
+    .construction-list i {
+      background: linear-gradient(90deg, var(--gold), var(--mint));
+      height: 2px;
+      position: absolute;
+      bottom: 1px;
+      left: 0;
+      transition: width 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    /* Нижняя панель новостей, слоев и управления временем (.bottom-bar) */
+    .bottom-bar {
+      z-index: 3;
+      background: rgba(12, 23, 35, 0.94);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      border-radius: 10px;
+      height: 56px;
+      align-items: center;
+      gap: 12px;
+      padding: 8px 14px;
+      display: flex;
+      position: absolute;
+      bottom: 16px;
+      left: 212px;
+      right: calc(var(--side) + 40px);
+    }
+    .news {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .news-label {
+      letter-spacing: 0.08em;
+      color: var(--gold);
+      align-items: center;
+      gap: 5px;
+      font-size: 10px;
+      font-weight: 800;
+      display: flex;
+      flex-shrink: 0;
+    }
+    .news-label i {
+      background: var(--gold);
+      border-radius: 50%;
+      width: 5px;
+      height: 5px;
+      box-shadow: 0 0 8px var(--gold);
+      animation: pulse-dot 1.5s infinite;
+    }
+    .news p {
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      font-size: 12px;
+      overflow: hidden;
+      color: #e2ecf2;
+    }
+    .city-actions {
+      border-left: 1px solid var(--line);
+      align-items: center;
+      gap: 4px;
+      padding-left: 10px;
+      display: flex;
+    }
+    .layer-chip {
+      padding: 6px 9px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--muted);
+      background: #142330;
+      transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .layer-chip:hover { color: #fff; background: #253949; transform: translateY(-1px); }
+    .layer-chip.active {
+      color: #0c1723;
+      background: var(--mint);
+      box-shadow: 0 0 14px rgba(142, 220, 190, 0.35);
+    }
+
+    .time-control {
+      border-left: 1px solid var(--line);
+      align-items: center;
+      gap: 4px;
+      padding-left: 10px;
+      display: flex;
+      flex-shrink: 0;
+    }
+    .time-control button {
+      min-width: 34px;
+      height: 36px;
+      color: var(--muted);
+      background: #142330;
+      border-radius: 6px;
+      place-items: center;
+      font-size: 12px;
+      font-weight: 800;
+      display: grid;
+      padding: 0 8px;
+      transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .time-control button:hover { background: #2a3c4a; color: #fff; transform: translateY(-1px); }
+    .time-control button.selected {
+      background: var(--gold);
+      color: #142230;
+      box-shadow: 0 0 14px rgba(255, 189, 105, 0.3);
+    }
+
+    /* Стартовый экран (.start-screen) */
+    .start-screen {
+      z-index: 25;
+      background: linear-gradient(90deg, #08131ff7 0%, #08131fed 28%, #08131fb8 52%, #08131f15 88%), linear-gradient(transparent 72%, #08131feb);
+      align-items: center;
+      padding: 45px 6vw;
+      display: flex;
+      position: absolute;
+      inset: 0;
+    }
+    .start-card {
+      width: 500px;
+      max-width: 92vw;
+      animation: title-arrive 0.85s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+    .title-mark {
+      color: var(--gold);
+      letter-spacing: 0.14em;
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .start-card h1 {
+      font-family: var(--display);
+      letter-spacing: -0.02em;
+      font-size: 72px;
+      font-weight: 700;
+      line-height: 0.96;
+      text-transform: uppercase;
+    }
+    .start-card h1 em {
+      letter-spacing: 0.02em;
+      color: var(--gold);
+      margin-top: 8px;
+      font-size: 46px;
+      display: block;
+    }
+    .start-card > p {
+      color: #c2d2dd;
+      margin-top: 18px;
+      font-size: 15px;
+      line-height: 1.65;
+    }
+    .start-facts {
+      color: var(--muted);
+      gap: 28px;
+      margin: 22px 0 24px;
+      font-size: 11px;
+      display: flex;
+    }
+    .start-facts span { flex-direction: column; gap: 3px; display: flex; }
+    .start-facts b {
+      color: #eff4f6;
+      font-family: var(--display);
+      font-size: 28px;
+      line-height: 1.1;
+    }
+    .secondary {
+      color: #d8e4ec;
+      border: 1px solid #93b1c748;
+      background: #14233090;
+      border-radius: 7px;
+      justify-content: center;
+      align-items: center;
+      gap: 9px;
+      min-height: 44px;
+      padding: 10px 15px;
+      font-size: 13px;
+      font-weight: 700;
+      display: flex;
+      transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .secondary:hover {
+      background: #243c4b;
+      border-color: var(--gold);
+      transform: translateY(-1px);
+    }
+
+    /* Модальные окна (.modal-backdrop & .modal) с кинематографичным входом */
+    .modal-backdrop {
+      z-index: 30;
+      backdrop-filter: blur(10px);
+      background: #050d18c4;
+      place-items: center;
+      padding: 20px;
+      display: grid;
+      position: absolute;
+      inset: 0;
+    }
+    .modal {
+      background: var(--panel);
+      border: 1px solid rgba(166, 200, 222, 0.22);
+      border-radius: 16px;
+      width: min(640px, 94vw);
+      max-height: calc(100dvh - 40px);
+      padding: 30px;
+      position: relative;
+      overflow-y: auto;
+      box-shadow: 0 30px 100px #000b, 0 0 40px rgba(0, 175, 202, 0.1);
+      animation: panel-arrive 0.34s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+    .modal.wide-modal {
+      width: min(1000px, 95vw);
+    }
+    .modal h2 {
+      font-family: var(--display);
+      letter-spacing: 0.01em;
+      margin: 4px 0 12px;
+      font-size: 32px;
+      line-height: 1.15;
+    }
+    .modal p {
+      color: #c5d4df;
+      margin: 8px 0;
+      font-size: 13px;
+      line-height: 1.65;
+    }
+    .story-kicker {
+      color: var(--gold);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-size: 11px;
+      font-weight: 800;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .modal-close {
+      position: absolute;
+      top: 18px;
+      right: 18px;
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      background: #0c1723;
+      color: var(--muted);
+      display: grid;
+      place-items: center;
+      font-size: 16px;
+      transition: all 0.15s;
+    }
+    .modal-close:hover { color: #fff; background: #253949; transform: rotate(90deg); }
+
+    .event-choices {
+      gap: 10px;
+      margin-top: 16px;
+      display: grid;
+    }
+    .event-choices button {
+      text-align: left;
+      background: #0c1b28;
+      border: 1px solid #9db8ca40;
+      border-radius: 9px;
+      padding: 14px 16px;
+      transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.2s, background 0.2s, box-shadow 0.2s;
+    }
+    .event-choices button:hover:not(:disabled) {
+      border-color: var(--gold);
+      background: #1b2d3e;
+      transform: translateX(4px);
+      box-shadow: -4px 0 0 var(--gold);
+    }
+    .event-choices button.chosen {
+      border-color: var(--mint);
+      background: #132a2e;
+      box-shadow: -4px 0 0 var(--mint);
+    }
+    .event-choices strong {
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      font-size: 14px;
+      color: #eef3f5;
+      display: flex;
+    }
+    .event-choices span {
+      color: var(--gold);
+      margin-top: 6px;
+      font-size: 12px;
+      display: block;
+    }
+    .event-choices small {
+      color: var(--muted);
+      margin-top: 5px;
+      font-size: 11px;
+      line-height: 1.5;
+      display: block;
+    }
+
+    .report-summary {
+      gap: 32px;
+      margin: 18px 0;
+      padding: 14px 18px;
+      background: var(--deep);
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      display: flex;
+      flex-wrap: wrap;
+    }
+    .report-summary > div { flex: 1; min-width: 140px; }
+    .report-summary strong {
+      font-family: var(--display);
+      color: var(--gold);
+      font-size: 30px;
+      display: block;
+    }
+    .report-summary span { color: var(--muted); font-size: 11px; }
+
+    /* Всплывающий тост по центру вверху */
+    .toast {
+      background: var(--gold);
+      color: #112330;
+      max-width: 560px;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6), 0 0 24px rgba(255, 189, 105, 0.45);
+      z-index: 40;
+      border-radius: 9px;
+      padding: 12px 20px;
+      font-size: 13px;
+      font-weight: 800;
+      position: absolute;
+      top: 102px;
+      left: 50%;
+      transform: translateX(-50%);
+      pointer-events: none;
+      animation: notice-enter 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+    .coral { color: var(--coral) !important; }
+    .mint { color: var(--mint) !important; }
+    .gold { color: var(--gold) !important; }
+    .muted { color: var(--muted) !important; }
+
+    /* Ключевые кадры футуристических анимаций */
+    @keyframes title-arrive {
+      0% { filter: blur(8px); opacity: 0; transform: translateY(24px) scale(0.98); }
+      100% { filter: none; opacity: 1; transform: none; }
+    }
+    @keyframes panel-arrive {
+      0% { opacity: 0; transform: translateY(18px) scale(0.97); filter: blur(4px); }
+      100% { opacity: 1; transform: none; filter: none; }
+    }
+    @keyframes notice-enter {
+      0% { opacity: 0; transform: translate(-50%, -16px) scale(0.95); }
+      100% { opacity: 1; transform: translate(-50%, 0) scale(1); }
+    }
+    @keyframes telemetry-sweep {
+      0% { left: -35%; opacity: 0; }
+      20% { opacity: 1; }
+      80% { opacity: 1; }
+      100% { left: 105%; opacity: 0; }
+    }
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.75); }
+    }
+    @keyframes holo-float {
+      0%, 100% { transform: translateY(0px); }
+      50% { transform: translateY(-2.5px); }
+    }
+    @keyframes dash-flow {
+      to { stroke-dashoffset: -48; }
+    }
+    .anim-dash {
+      stroke-dasharray: 8 6;
+      animation: dash-flow 1.4s linear infinite;
+    }
+
+    @media (max-width: 1200px) {
+      :root { --side: 310px; }
+      .project-rail, .bottom-bar { left: 24px; }
+      .city-navigator { display: none; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, ::before, ::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="game-shell" id="game-shell">
+    <!-- 1. Полноэкранный 3D-город (MapLibre 3D Buildings + deck.gl) -->
+    <div class="city-canvas">
+      <div id="kepler-map-container"></div>
+      <div id="telemetry-pulse-wave" class="telemetry-pulse-wave"></div>
+    </div>
+
+    <!-- Всплывающее уведомление (.toast) -->
+    <div id="toast-container"></div>
+
+    <!-- 2. Верхняя панель ресурсов (.topbar) -->
+    <header class="topbar">
+      <div class="brand-box">
+        <div class="brand-symbol">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+          </svg>
+        </div>
+        <div class="brand-title">
+          <strong>АСТАНА 3D</strong>
+          <small id="rank-label">Ранг I • 120 XP</small>
+        </div>
+      </div>
+
+      <div class="resource-strip">
+        <!-- Свободный бюджет (с учетом резерва OPEX) -->
+        <div class="stat money">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="2"/><path d="M6 12h.01M18 12h.01"/></svg>
+          <div>
+            <span class="stat-label">Свободный бюджет</span>
+            <strong id="kpi-budget">100.0 <small>млрд ₸</small></strong>
+            <em id="kpi-opex">Резерв содержания: 0.0 млрд ₸</em>
+          </div>
+        </div>
+
+        <!-- Индекс опоздавших в час пик (Пробки) -->
+        <div class="stat congestion" id="stat-congestion-box" onclick="openModal('report')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          <div>
+            <span class="stat-label">Опоздали в час пик</span>
+            <strong id="kpi-congestion">78% <small>цель ≤30%</small></strong>
+            <em id="kpi-penalty">Считаем людей, а не машинки</em>
+          </div>
+        </div>
+
+        <!-- Репутация Акима -->
+        <div class="stat">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/></svg>
+          <div>
+            <span class="stat-label">Репутация и Законность</span>
+            <strong id="kpi-trust">65% <small id="kpi-legal">НПА: 78%</small></strong>
+            <span class="meter"><i id="trust-meter-bar" style="transform: scaleX(0.65)"></i></span>
+          </div>
+        </div>
+
+        <!-- Срок полномочий (60 месяцев) -->
+        <div class="stat">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+          <div>
+            <span class="stat-label">Срок полномочий</span>
+            <strong id="kpi-month">1 <small>из 60 мес.</small></strong>
+            <em>Контроль с 55-го месяца</em>
+          </div>
+        </div>
+      </div>
+
+      <!-- Кнопки обучения, тестов, дипломатии и демо-отчета -->
+      <div class="top-actions">
+        <button class="hud-btn" onclick="openModal('academy')">
+          <span>6 Компетенций и Тесты</span>
+        </button>
+        <button class="hud-btn" onclick="openModal('waragent')">
+          <span>WarAgent Дипломатия</span>
+        </button>
+        <button class="hud-btn" onclick="openModal('report')">
+          <span>Отчет «До / После»</span>
+        </button>
+        <button class="hud-btn gold" onclick="activatePresentationDemo()">
+          <span>⚡ Демо-показ</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- 3. Заголовок текущего района и окно финального контроля 55–60 мес -->
+    <div class="city-heading">
+      <h1>
+        <span id="heading-district-name">РАЙОН «ЕСИЛЬ»</span>
+        <span class="status-pill" id="heading-status-pill">Камеры: оценка на глаз</span>
+      </h1>
+      <p id="heading-district-focus">Байтерек, Акорда, Дом Министерств, пр. Мангилик Ел и Туран</p>
+    </div>
+
+    <div class="final-window">
+      <span>КОНТРОЛЬ 55–60 МЕС. <b id="final-goal-label">≤30%</b></span>
+      <div id="final-months-strip">
+        <i>55</i><i>56</i><i>57</i><i>58</i><i>59</i><i>60</i>
+      </div>
+    </div>
+
+    <!-- 3B. Пульт 3D-камеры и свободного перемещения по карте (.map-nav-pad) -->
+    <aside class="map-nav-pad">
+      <div class="map-nav-header">
+        <span>3D КАМЕРА И КАРТА</span>
+        <span class="mint" id="map-mode-badge">СВОБОДНО</span>
+      </div>
+      <div class="map-dpad-row">
+        <button class="map-cam-btn" onclick="panMapBy(0, -180)" title="Сдвинуть карту на Север (W / ↑)">↑</button>
+        <button class="map-cam-btn" onclick="panMapBy(-180, 0)" title="Сдвинуть карту на Запад (A / ←)">←</button>
+        <button class="map-cam-btn" onclick="flyToAstanaOverview(true)" title="В центр Астаны (Байтерек)">⌂</button>
+        <button class="map-cam-btn" onclick="panMapBy(180, 0)" title="Сдвинуть карту на Восток (D / →)">→</button>
+        <button class="map-cam-btn" onclick="panMapBy(0, 180)" title="Сдвинуть карту на Юг (S / ↓)">↓</button>
+      </div>
+      <div class="map-dpad-row">
+        <button class="map-cam-btn" onclick="zoomMapBy(0.8)" title="Приблизить (+) / Колесо мыши">+</button>
+        <button class="map-cam-btn" onclick="zoomMapBy(-0.8)" title="Отдалить (−) / Колесо мыши">−</button>
+        <button class="map-cam-btn" onclick="rotateMapBy(-25)" title="Повернуть камеру влево (Q)">⟲</button>
+        <button class="map-cam-btn" onclick="rotateMapBy(25)" title="Повернуть камеру вправо (E)">⟳</button>
+        <button class="map-cam-btn" id="btn-pitch-toggle" onclick="toggleMapPitch()" title="Переключить наклон 3D / 2D">3D</button>
+      </div>
+      <button class="map-free-btn" id="btn-free-map" onclick="toggleFreeMapMode()" title="Скрыть/показать панели проектов для обзора всей карты (клавиша H)">
+        <span>👁 Свободный обзор (H)</span>
+      </button>
+      <div class="map-hint-line">ЛКМ: двигать • ПКМ: 3D-вращение • Колесо: зум</div>
+    </aside>
+
+    <!-- 4. Навигатор 6 районов Астаны слева внизу (.city-navigator) -->
+    <aside class="city-navigator">
+      <div class="city-navigator-title">
+        <span>6 РАЙОНОВ (≤50%)</span>
+        <button onclick="toggleAutoOrbit()" id="btn-orbit-cam" class="muted" style="font-size:9px;font-weight:800;">3D ОРБИТА: ВЫКЛ</button>
+      </div>
+      <div class="district-nav-grid" id="district-nav-grid"></div>
+    </aside>
+
+    <!-- 5. Нижняя рельса выбора проектов (.project-rail) -->
+    <section class="project-rail">
+      <div class="project-groups" id="project-groups-tabs"></div>
+      <div class="project-options" id="project-options-strip"></div>
+    </section>
+
+    <!-- 6. Правый инспектор выбранного проекта (.inspector) -->
+    <aside class="inspector" id="project-inspector"></aside>
+
+    <!-- 7. Нижняя панель новостей, 3D-слоев Kepler и времени (.bottom-bar) -->
+    <footer class="bottom-bar">
+      <div class="news">
+        <span class="news-label"><i></i> ТЕЛЕМЕТРИЯ iKomek-109</span>
+        <p id="bottom-news-ticker">Вы назначены акимом Астаны. Сначала установите камеры «Сергек» и разведите утренние часы пик без перекрытия улиц.</p>
+      </div>
+
+      <div class="city-actions">
+        <button id="chip-buildings3d" class="layer-chip active" onclick="toggleLayerVisibility('buildings3d')">3D Здания</button>
+        <button id="chip-trips" class="layer-chip active" onclick="toggleLayerVisibility('trips')">Потоки</button>
+        <button id="chip-arcs" class="layer-chip active" onclick="toggleLayerVisibility('arcs')">3D Дуги</button>
+        <button id="chip-hexagons" class="layer-chip" onclick="toggleLayerVisibility('hexagons')">Hexbin</button>
+      </div>
+
+      <div class="time-control">
+        <button onclick="advanceSimulationMonths(1)" class="selected" title="Продвинуть время на 1 месяц">+1 мес ▶</button>
+        <button onclick="advanceSimulationMonths(3)" title="Продвинуть время на 3 месяца">+3 мес ▶▶</button>
+        <button onclick="resetSimulationAll()" title="Начать заново">↺</button>
+      </div>
+    </footer>
+
+    <!-- Модальный слой (Стартовый экран, События, Академия 6 компетенций, Тесты До/После, WarAgent, Итоговый отчет) -->
+    <div id="modal-container"></div>
+  </div>
+
+  <script src="data.js"></script>
+  <script src="waragent_data.js"></script>
+  <script src="learning_engine.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
